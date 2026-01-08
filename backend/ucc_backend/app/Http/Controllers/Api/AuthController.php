@@ -3,73 +3,144 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Mail\PasswordResetMail;
 use App\Models\User;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Validation\ValidationException;
+use Mail;
+use Tymon\JWTAuth\Facades\JWTAuth;
+use Tymon\JWTAuth\Facades\JWTException;
 
 class AuthController extends Controller
 {
     //
     public function register(Request $request)
     {
-        $validated = $request->validate([
-            'name' => ['required', 'string', 'max:255'],
-            'email' => ['required', 'email', 'unique:users,email'],
-            'password' => ['required', 'min:6', 'confirmed'],
+        $request->validate([
+            'name' => 'required|string|max:255',
+            'email' => 'required|string|email|max:255|unique:users',
+            'password' => 'required|string|min:6|confirmed',
         ]);
 
         $user = User::create([
-            'name' => $validated['name'],
-            'email' => $validated['email'],
-            'password' => Hash::make($validated['password']),
+            'name' => $request->name,
+            'email' => $request->email,
+            'password' => Hash::make($request->password),
         ]);
 
-        $token = $user->createToken('auth_token')->plainTextToken;
+        try {
+            $token = JWTAuth::fromUser($user);
+        } catch (JWTException $e) {
+            return response()->json(['error' => 'Could not create token'], 500);
+        }
 
         return response()->json([
+            'status' => 'succes',
+            'token' => $token,
+            'user' => $user,
+        ], 200);
+    }
+
+    public function login(Request $request)
+    {
+        $credentials = $request->validate([
+            'email' => 'required|email',
+            'password' => 'required',
+        ]);
+
+        $token = Auth::attempt($credentials);
+        if (! $token) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Unathorized',
+            ], 401);
+        }
+
+        $user = Auth::user();
+
+        return response()->json([
+            'status' => 'succes',
             'user' => $user,
             'token' => $token,
         ], 201);
     }
 
-        public function login(Request $request)
+    public function logout()
     {
-        $request->validate([
-            'email' => ['required', 'email'],
-            'password' => ['required'],
-        ]);
-
-        $user = User::where('email', $request->email)->first();
-
-        if (! $user || ! Hash::check($request->password, $user->password)) {
-            throw ValidationException::withMessages([
-                'email' => ['Hibás email vagy jelszó.'],
-            ]);
+        try {
+            JWTAuth::invalidate(JWTAuth::getToken());
+        } catch (JWTException $e) {
+            return response()->json(['status' => 'error', 'message' => 'Hiba történt'], 500);
         }
 
-        
-        $user->tokens()->delete();
-
-        $token = $user->createToken('auth_token')->plainTextToken;
-
-        return response()->json([
-            'user' => $user,
-            'token' => $token,
-        ]);
+        return response()->json(['message' => 'Sikeres kilépés'], 201);
     }
 
-    public function logout(Request $request)
+    public function me()
     {
-        $request->user()->currentAccessToken()->delete();
+        try {
 
-        return response()->json([
-            'message' => 'Sikeres kijelentkezés',
-        ]);
+            $user = Auth::user();
+            if (! $user) {
+
+                return response()->json(['status' => 'error', 'message' => 'Felhasználó nem található'], 404);
+            }
+
+            return response()->json($user);
+        } catch (JWTException $e) {
+            return response()->json(['error' => 'Hiba történt az adatok lekérése közben'], 500);
+        }
     }
 
-    public function me(Request $request)
+    // jelszó visszaállítás
+
+    public function sendResetLink(Request $request)
     {
-        return response()->json($request->user());
+        $request->validate(['email' => 'required|email']);
+
+        $user = User::where('email', $request->email)->first();
+        if (! $user) {
+            return response()->json(['message' => 'User not found'], 404);
+        }
+
+        $customClaims = [
+            'email' => $user->email,
+            'exp' => now()->addMinutes(15)->timestamp,
+        ];
+        $token = JWTAuth::claims($customClaims)->fromUser($user);
+
+        Mail::to($user->email)->send(new PasswordResetMail($token, $user->email));
+
+        return response()->json(['message' => 'Password reset email sent']);
+    }
+
+    public function resetPassword(Request $request)
+    {
+        $request->validate([
+            'token' => 'required|string',
+            'password' => 'required|string|confirmed|min:6',
+        ]);
+
+        try {
+            $payload = JWTAuth::setToken($request->token)->getPayload();
+            $email = $payload['email'] ?? null;
+        } catch (JWTException $e) {
+            return response()->json(['message' => 'Invalid or expired token'], 400);
+        }
+
+        if (! $email) {
+            return response()->json(['message' => 'Invalid token payload'], 400);
+        }
+
+        $user = User::where('email', $email)->first();
+        if (! $user) {
+            return response()->json(['message' => 'User not found'], 404);
+        }
+
+        $user->password = Hash::make($request->password);
+        $user->save();
+
+        return response()->json(['message' => 'Password successfully reset']);
     }
 }
