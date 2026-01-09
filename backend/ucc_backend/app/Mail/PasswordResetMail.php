@@ -21,7 +21,8 @@ class PasswordResetMail extends Mailable
 
     public function build()
     {
-        $resetUrl = url("/reset-password?token={$this->token}&email={$this->email}");
+       $resetUrl = "http://localhost:8080/reset-password?token={$this->token}&email={$this->email}";
+
 
         return $this->subject('Password Reset Request')
                     ->view('emails.password_reset')

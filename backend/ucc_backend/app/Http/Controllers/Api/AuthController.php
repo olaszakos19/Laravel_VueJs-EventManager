@@ -11,36 +11,32 @@ use Illuminate\Support\Facades\Hash;
 use Mail;
 use Tymon\JWTAuth\Facades\JWTAuth;
 use Tymon\JWTAuth\Facades\JWTException;
+use App\Http\Requests\StoreUserRequest;
+use App\Http\Requests\UpdateUserRequest;
 
 class AuthController extends Controller
 {
     //
-    public function register(Request $request)
-    {
-        $request->validate([
-            'name' => 'required|string|max:255',
-            'email' => 'required|string|email|max:255|unique:users',
-            'password' => 'required|string|min:6|confirmed',
-        ]);
+public function register(StoreUserRequest $request)
+{
+    $user = User::create([
+        'name' => $request->name,
+        'email' => $request->email,
+        'password' => Hash::make($request->password),
+    ]);
 
-        $user = User::create([
-            'name' => $request->name,
-            'email' => $request->email,
-            'password' => Hash::make($request->password),
-        ]);
-
-        try {
-            $token = JWTAuth::fromUser($user);
-        } catch (JWTException $e) {
-            return response()->json(['error' => 'Could not create token'], 500);
-        }
-
-        return response()->json([
-            'status' => 'succes',
-            'token' => $token,
-            'user' => $user,
-        ], 200);
+    try {
+        $token = JWTAuth::fromUser($user);
+    } catch (JWTException $e) {
+        return response()->json(['error' => 'Could not create token'], 500);
     }
+
+    return response()->json([
+        'status' => 'success',
+        'token' => $token,
+        'user' => $user,
+    ], 200);
+}
 
     public function login(Request $request)
     {
@@ -92,6 +88,27 @@ class AuthController extends Controller
             return response()->json(['error' => 'Hiba történt az adatok lekérése közben'], 500);
         }
     }
+
+
+public function update(UpdateUserRequest $request)
+{
+    $user = $request->user();
+
+    $validated = $request->validated();
+
+    $user->name = $validated['name'];
+
+    if (!empty($validated['new_password'])) {
+        $user->password = Hash::make($validated['new_password']);
+    }
+
+    $user->save();
+
+    return response()->json([
+        'message' => 'Profil frissítve!',
+        'user' => $user
+    ]);
+}
 
     // jelszó visszaállítás
 

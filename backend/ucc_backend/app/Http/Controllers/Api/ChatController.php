@@ -3,108 +3,217 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\Chat;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 
 class ChatController extends Controller
 {
+    /**
+     * Fő chat endpoint
+     * POST /api/chat
+     */
     public function chat(Request $request)
     {
         $request->validate([
             'message' => 'required|string',
         ]);
 
+        // JWT middleware garantálja
         $user = Auth::user();
 
-        if (! $user) {
-            return response()->json([
-                'message' => 'A chat használatához be kell jelentkezned. Kérlek jelentkezz be, majd próbáld újra.',
-            ], 401);
-        }
+        // Aktív chat
+        $chat = Chat::firstOrCreate(
+            [
+                'user_id' => $user->id,
+                'status' => 'open',
+            ],
+            [
+                'type' => 'bot',
+            ]
+        );
 
         $message = $request->message;
-        $userMessage = mb_strtolower($message);
-        
-        if (str_contains($userMessage, 'ügyintéző')) {
+        $text = mb_strtolower($message);
+
+        // User message mentése
+        $chat->messages()->create([
+            'sender_type' => 'user',
+            'message' => $message,
+        ]);
+
+        /* =======================
+         *  CHAT LEZÁRÁS
+         * ======================= */
+        if (str_contains($text, 'köszönöm')) {
+            $reply = 'Szívesen! 😊 A beszélgetést lezártam.';
+
+            $this->botReply($chat, $reply);
+
+            $chat->update(['status' => 'closed']);
+
             return response()->json([
-                'message' => 'Összekapcsolom egy emberi ügyfélszolgálati munkatárssal… Kérlek várj egy pillanatot.',
+                'message' => $reply,
+                'closed' => true,
+            ]);
+        }
+
+        /* =======================
+         *  ÜGYINTÉZŐ ÁTADÁS
+         * ======================= */
+        if (str_contains($text, 'ügyintéző')) {
+            $reply = 'Összekapcsolom egy emberi ügyintézővel…';
+
+            $chat->update(['type' => 'agent']);
+
+            $this->botReply($chat, $reply);
+
+            return response()->json([
+                'message' => $reply,
                 'handover' => true,
             ]);
         }
 
+        /* =======================
+         *  LISTÁZÁS
+         * ======================= */
+        if (str_contains($text, 'listáz') || str_contains($text, 'eseményeim')) {
+            return $this->respond($chat, $this->listEvents($user));
+        }
+
+        /* =======================
+         *  KERESÉS
+         * ======================= */
+        if (str_contains($text, 'keres')) {
+            return $this->respond($chat, $this->searchEventSmart($user, $message));
+        }
+
+        /* =======================
+         *  TÖRLÉS KÉRÉS
+         * ======================= */
+        if (str_contains($text, 'törlés')) {
+            return $this->respond($chat, $this->requestDeleteEvent($user, $message));
+        }
+
+        /* =======================
+         *  TÖRLÉS MEGERŐSÍTÉS
+         * ======================= */
+        if (in_array($text, ['igen', 'nem'])) {
+            return $this->respond($chat, $this->confirmDeleteEvent($user, $text));
+        }
+
+        /* =======================
+         *  KÖSZÖNTÉS
+         * ======================= */
         if (
-            str_contains($userMessage, 'listáz') ||
-            str_contains($userMessage, 'eseményeim')
+            str_contains($text, 'szia') ||
+            str_contains($text, 'hello') ||
+            str_contains($text, 'hi')
         ) {
-            return response()->json([
-                'message' => $this->listEvents($user),
-            ]);
+            return $this->respond(
+                $chat,
+                'Szia! Hogyan segíthetek az eseményeid kezelésében?'
+            );
         }
 
-        if (str_contains($userMessage, 'keres')) {
-            return response()->json([
-                'message' => $this->searchEventSmart($user, $message),
-            ]);
-        }
+        /* =======================
+         *  DEFAULT
+         * ======================= */
+        return $this->respond(
+            $chat,
+            'Nem teljesen értem. Szeretnéd, hogy emberi ügyintéző segítsen?'
+        );
+    }
 
-        if (str_contains($userMessage, 'törlés')) {
-            return response()->json([
-                'message' => $this->requestDeleteEvent($user, $message),
-            ]);
-        }
+    /* ============================================================
+     *  CHAT HISTORY
+     * ============================================================ */
 
-        if (in_array($userMessage, ['igen', 'nem'])) {
-            return response()->json([
-                'message' => $this->confirmDeleteEvent($user, $userMessage),
-            ]);
-        }
+    /**
+     * GET /api/chat/history
+     */
+    public function history()
+    {
+        $user = Auth::user();
 
-        if (
-            str_contains($userMessage, 'hello') ||
-            str_contains($userMessage, 'hi') ||
-            str_contains($userMessage, 'szia')
-        ) {
-            return response()->json([
-                'message' => 'Szia! Hogyan segíthetek az eseményeid kezelésében?',
-            ]);
-        }
+        return response()->json(
+            $user->chats()
+                ->latest()
+                ->get()
+                ->map(fn ($chat) => [
+                    'id' => $chat->id,
+                    'type' => $chat->type,
+                    'status' => $chat->status,
+                    'created_at' => $chat->created_at->toDateTimeString(),
+                    'last_message' => optional(
+                        $chat->messages()->latest()->first()
+                    )->message,
+                ])
+        );
+    }
 
-        return response()->json([
-            'message' => 'Sajnálom, nem értem a kérdést. Szeretnéd, ha kapcsolnánk egy emberi ügyfélszolgálathoz?',
+    /**
+     * GET /api/chat/{chat}/messages
+     */
+    public function messages(Chat $chat)
+    {
+        abort_if($chat->user_id !== Auth::id(), 403);
+
+        return response()->json(
+            $chat->messages()
+                ->orderBy('created_at')
+                ->get([
+                    'id',
+                    'sender_type',
+                    'message',
+                    'created_at',
+                ])
+        );
+    }
+
+    /* ============================================================
+     *  HELPER METÓDUSOK
+     * ============================================================ */
+
+    private function respond(Chat $chat, string $message)
+    {
+        $this->botReply($chat, $message);
+
+        return response()->json(['message' => $message]);
+    }
+
+    private function botReply(Chat $chat, string $message)
+    {
+        $chat->messages()->create([
+            'sender_type' => 'bot',
+            'message' => $message,
         ]);
     }
 
+
+
     private function listEvents($user): string
     {
-        $events = $user->events;
+        $events = $user->events()->get();
 
         if ($events->isEmpty()) {
             return 'Jelenleg nincs rögzített eseményed.';
         }
 
-        $response = "Az eseményeid:\n";
-
-        foreach ($events as $event) {
-            $response .= "- {$event->title} ({$event->occurrence})\n";
-        }
-
-        return $response;
+        return "Az eseményeid:\n" .
+            $events->map(fn ($e) => "- {$e->title} ({$e->occurrence})")->implode("\n");
     }
 
     private function searchEventSmart($user, string $message): string
     {
-        $text = mb_strtolower($message);
-
-        $remove = [
+        $query = trim(str_replace([
             'keresd meg', 'keresd', 'keres',
             'találd meg', 'szeretném', 'meg tudod',
             'az', 'a', 'egy', 'eseményt', 'esemény',
-        ];
-
-        $query = trim(str_replace($remove, '', $text));
+        ], '', mb_strtolower($message)));
 
         if ($query === '') {
-            return 'Kérlek add meg, melyik eseményt keresed. Pl: "keresd meg a meeting eseményt"';
+            return 'Add meg, melyik eseményt keresed.';
         }
 
         $events = $user->events()
@@ -112,27 +221,20 @@ class ChatController extends Controller
             ->get();
 
         if ($events->isEmpty()) {
-            return "Nem találtam eseményt a következő névvel: \"{$query}\".";
+            return "Nem találtam eseményt: \"{$query}\".";
         }
 
-        $response = "Talált események:\n";
-
-        foreach ($events as $event) {
-            $response .= "- {$event->title} ({$event->occurrence})\n";
-        }
-
-        return $response;
+        return "Talált események:\n" .
+            $events->map(fn ($e) => "- {$e->title} ({$e->occurrence})")->implode("\n");
     }
 
     private function requestDeleteEvent($user, string $message): string
     {
-        $text = mb_strtolower($message);
-
-        $remove = [
-            'töröld', 'távolítsd el', 'töröld a', 'törlés',
-        ];
-
-        $query = trim(str_replace($remove, '', $text));
+        $query = trim(str_replace(
+            ['töröld', 'távolítsd el', 'törlés', 'töröld a'],
+            '',
+            mb_strtolower($message)
+        ));
 
         $event = $user->events()
             ->where('title', 'like', "%{$query}%")
@@ -142,13 +244,11 @@ class ChatController extends Controller
             return 'Nem találtam ilyen eseményt.';
         }
 
-        session([
-            'pending_delete_event_id' => $event->id,
-        ]);
+        session(['pending_delete_event_id' => $event->id]);
 
-        return "Biztosan törölni szeretnéd ezt az eseményt?\n"
-             ."{$event->title} ({$event->occurrence})\n"
-             .'Írd: IGEN / NEM';
+        return "Biztosan törölni szeretnéd?\n"
+            . "{$event->title} ({$event->occurrence})\n"
+            . 'Írd: IGEN / NEM';
     }
 
     private function confirmDeleteEvent($user, string $answer): string
@@ -159,19 +259,13 @@ class ChatController extends Controller
 
         if ($answer === 'nem') {
             session()->forget('pending_delete_event_id');
-
             return 'A törlés megszakítva.';
         }
 
-        $eventId = session()->pull('pending_delete_event_id');
-        $event = $user->events()->find($eventId);
+        $user->events()
+            ->whereKey(session()->pull('pending_delete_event_id'))
+            ->delete();
 
-        if ($event) {
-            $event->delete();
-
-            return 'Az esemény sikeresen törölve lett.';
-        }
-
-        return 'Hiba történt a törlés során.';
+        return 'Az esemény törölve lett.';
     }
 }

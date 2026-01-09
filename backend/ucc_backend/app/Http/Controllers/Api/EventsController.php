@@ -6,33 +6,13 @@ use App\Http\Controllers\Controller;
 use App\Models\Event;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use App\Http\Requests\StoreEventRequest;
+use App\Http\Requests\UpdateEventRequest;
 
 class EventsController extends Controller
 {
     //
-    public function store(Request $request)
-    {
 
-        $validated = $request->validate([
-            'title' => 'required|string|max:255',
-            'description' => 'nullable|string',
-            'occurence' => 'required|date',
-        ]);
-
-        $event = Event::create([
-            'creator_id' => $request->user()->id,
-            'title' => $validated['title'],
-            'description' => $validated['description'] ?? null,
-            'occurence' => $validated['occurence'],
-        ]);
-
-        $event->load('creator');
-
-        return response()->json([
-            'event' => $event,
-        ], 201);
-
-    }
 
     public function getEvents()
     {
@@ -47,24 +27,46 @@ class EventsController extends Controller
 
         return response()->json($event);
     }
+public function store(StoreEventRequest $request)
+{
+    $validated = $request->validated();
 
-    public function updateEvent(Request $request, $id)
-    {
-        $event = Event::findOrFail($id);
+    $event = Event::create([
+        'creator_id' => $request->user()->id,
+        'title' => $validated['title'],
+        'description' => $validated['description'] ?? null,
+        'occurence' => $validated['occurence'],
+    ]);
 
-        if ($event->creator_id !== Auth::id()) {
-            return response()->json(['error' => 'Unauthorized'], 403);
-        }
+    $event->load('creator');
 
-        $request->validate([
-            'description' => 'nullable|string|max:255',
-        ]);
+    return response()->json(['event' => $event], 201);
+}
 
-        $event->description = $request->description;
-        $event->save();
+public function updateEvent(UpdateEventRequest $request, $id)
+{
+    $event = Event::findOrFail($id);
 
-        return response()->json($event, 201);
+    if ($event->creator_id !== Auth::id()) {
+        return response()->json(['error' => 'Unauthorized'], 403);
     }
+
+    $validated = $request->validated();
+
+    if (isset($validated['description'])) {
+        $event->description = $validated['description'];
+    }
+    if (isset($validated['title'])) {
+        $event->title = $validated['title'];
+    }
+    if (isset($validated['occurence'])) {
+        $event->occurence = $validated['occurence'];
+    }
+
+    $event->save();
+
+    return response()->json($event, 201);
+}
 
     public function deleteEvent($id)
     {
